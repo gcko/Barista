@@ -1,8 +1,9 @@
 #!/bin/bash
 # ABOUTME: Tests for modules/rate-limits.sh -- _parse_reset_epoch (the #38 resets_at
 # ABOUTME: ISO-8601 -> epoch parser that works on BSD/macOS and GNU/Linux date) and
-# ABOUTME: credential-file permission enforcement and _check_backoff (the post-429
-# ABOUTME: cooldown-state file reader).
+# ABOUTME: credential-file permission enforcement, Keychain item selection when
+# ABOUTME: several 'Claude Code-credentials' items exist, and _check_backoff (the
+# ABOUTME: post-429 cooldown-state file reader).
 # ABOUTME: Run with: bash tests/test_rate_limits.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,7 +76,51 @@ assert_eq "world-readable credentials file is rejected" \
     "" \
     "$(CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" _get_claude_token)"
 
-rm -f "$TOKEN_CONFIG_DIR/.credentials.json" "$TOKEN_BIN/security"
+rm -f "$TOKEN_CONFIG_DIR/.credentials.json"
+
+# -----------------------------------------------------------------------------
+# _get_claude_token Keychain selection
+# The Keychain can hold several 'Claude Code-credentials' items, and `security -s`
+# alone returns whichever it finds first -- e.g. one under account "unknown" that
+# carries only mcpOAuth. The stub answers an account-scoped lookup (-a) from
+# $STUB_SCOPED and an unscoped one from $STUB_UNSCOPED; an empty value means "no
+# such item" (exit 44, as the real tool does).
+# -----------------------------------------------------------------------------
+echo "=== Keychain Item Selection Tests ==="
+cat > "$TOKEN_BIN/security" <<'STUB'
+#!/bin/sh
+val="$STUB_UNSCOPED"
+for arg in "$@"; do [ "$arg" = "-a" ] && val="$STUB_SCOPED"; done
+[ -z "$val" ] && exit 44
+printf '%s\n' "$val"
+STUB
+chmod 700 "$TOKEN_BIN/security"
+
+MCP_ONLY='{"mcpOAuth":{"some-server|abc":{"accessToken":"mcp-server-token"}}}'
+CLAUDE_ITEM='{"claudeAiOauth":{"accessToken":"claude-token","refreshToken":"r"},"mcpOAuth":{}}'
+CLAUDE_ITEM_HEX="$(printf '%s' "$CLAUDE_ITEM" | xxd -p | tr -d '\n')"
+MCP_ONLY_HEX="$(printf '%s' "$MCP_ONLY" | xxd -p | tr -d '\n')"
+
+lookup() {
+    CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" USER=tester \
+        STUB_SCOPED="$1" STUB_UNSCOPED="$2" _get_claude_token
+}
+
+assert_eq "user's item wins over an mcpOAuth-only item found first" \
+    "claude-token" "$(lookup "$CLAUDE_ITEM" "$MCP_ONLY")"
+assert_eq "falls back to the unscoped lookup when no item for the user" \
+    "claude-token" "$(lookup "" "$CLAUDE_ITEM")"
+assert_eq "falls back when the user's item has no claudeAiOauth" \
+    "claude-token" "$(lookup "$MCP_ONLY" "$CLAUDE_ITEM")"
+assert_eq "hex-encoded user's item is still decoded" \
+    "claude-token" "$(lookup "$CLAUDE_ITEM_HEX" "$MCP_ONLY")"
+assert_eq "an mcpOAuth server token is never returned (hex regex path)" \
+    "" "$(lookup "$MCP_ONLY_HEX" "$MCP_ONLY_HEX")"
+assert_eq "unset USER still reaches the unscoped lookup" \
+    "claude-token" "$(CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" USER='' \
+        STUB_SCOPED="" STUB_UNSCOPED="$CLAUDE_ITEM" _get_claude_token)"
+
+rm -f "$TOKEN_BIN/security"
 rmdir "$TOKEN_BIN" "$TOKEN_CONFIG_DIR" 2>/dev/null
 
 # Sandbox CACHE_DIR so the suite never touches the real ~/.claude/barista-cache.

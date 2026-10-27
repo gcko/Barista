@@ -26,7 +26,6 @@
 # Extract OAuth token from (in order):
 #   1. ~/.claude/.credentials.json — used on Windows and some Linux setups
 #   2. macOS Keychain via `security` — used on macOS
-# Handles both plain JSON and hex-encoded formats (macOS 15+ / recent Claude Code)
 _credentials_file_is_private() {
     local file="$1"
     local mode=""
@@ -63,8 +62,29 @@ _get_claude_token() {
 
     command -v security >/dev/null 2>&1 || return
 
-    local raw
-    raw=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)
+    # The Keychain can hold more than one 'Claude Code-credentials' item (for
+    # example a second one under account "unknown" carrying only mcpOAuth), and
+    # `security -s` alone returns whichever it finds first. Ask for the current
+    # user's item first, then fall back to the unscoped lookup, and keep the
+    # first candidate that actually yields a claudeAiOauth token.
+    local user="${USER:-$(id -un 2>/dev/null)}"
+    local raw token
+    if [ -n "$user" ]; then
+        raw=$(security find-generic-password -s 'Claude Code-credentials' -a "$user" -w 2>/dev/null)
+        token=$(_extract_oauth_token "$raw")
+    fi
+    if [ -z "$token" ]; then
+        raw=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)
+        token=$(_extract_oauth_token "$raw")
+    fi
+
+    echo "$token"
+}
+
+# Pull claudeAiOauth.accessToken out of a raw Keychain value. Handles both
+# plain JSON and hex-encoded formats (macOS 15+ / recent Claude Code).
+_extract_oauth_token() {
+    local raw="$1"
     [ -z "$raw" ] && return
 
     # Try parsing as plain JSON first (older format)
@@ -80,8 +100,10 @@ _get_claude_token() {
             token=$(echo "$decoded" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
 
             if [ -z "$token" ]; then
-                # Fall back to regex extraction (handles binary prefix bytes)
-                token=$(echo "$decoded" | grep -o '"accessToken":"[^"]*"' | head -1 | sed 's/"accessToken":"//;s/"$//')
+                # Fall back to regex extraction (handles binary prefix bytes).
+                # Anchored to claudeAiOauth so an mcpOAuth server token is never
+                # sent to api.anthropic.com.
+                token=$(echo "$decoded" | grep -o '"claudeAiOauth":{[^}]*"accessToken":"[^"]*"' | head -1 | sed 's/.*"accessToken":"//;s/"$//')
             fi
         fi
     fi
