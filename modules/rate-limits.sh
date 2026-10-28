@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # =============================================================================
 # Rate Limits Module - Shows 5-hour and 7-day usage with projections
-# Requires macOS Keychain with Claude Code OAuth token
+# Reads an owner-only Claude Code credential file; never accesses macOS Keychain
 # =============================================================================
 # Configuration options:
 #   RATE_SHOW_5H            - Show 5-hour rate limit (default: true)
@@ -23,9 +23,9 @@
 #   RATE_BACKOFF_SECONDS    - Fallback backoff after 429 if no retry-after header (default: 300)
 # =============================================================================
 
-# Extract OAuth token from (in order):
-#   1. ~/.claude/.credentials.json — used on Windows and some Linux setups
-#   2. macOS Keychain via `security` — used on macOS
+# Read OAuth from ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json only.
+# The CLI must expose a private credential file; there is no Keychain migration
+# or fallback. Owner-only file permissions cannot protect against the same user.
 _credentials_file_is_private() {
     local file="$1"
     local mode=""
@@ -60,55 +60,9 @@ _get_claude_token() {
         fi
     fi
 
-    command -v security >/dev/null 2>&1 || return
-
-    # The Keychain can hold more than one 'Claude Code-credentials' item (for
-    # example a second one under account "unknown" carrying only mcpOAuth), and
-    # `security -s` alone returns whichever it finds first. Ask for the current
-    # user's item first, then fall back to the unscoped lookup, and keep the
-    # first candidate that actually yields a claudeAiOauth token.
-    local user="${USER:-$(id -un 2>/dev/null)}"
-    local raw token
-    if [ -n "$user" ]; then
-        raw=$(security find-generic-password -s 'Claude Code-credentials' -a "$user" -w 2>/dev/null)
-        token=$(_extract_oauth_token "$raw")
-    fi
-    if [ -z "$token" ]; then
-        raw=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)
-        token=$(_extract_oauth_token "$raw")
-    fi
-
-    echo "$token"
-}
-
-# Pull claudeAiOauth.accessToken out of a raw Keychain value. Handles both
-# plain JSON and hex-encoded formats (macOS 15+ / recent Claude Code).
-_extract_oauth_token() {
-    local raw="$1"
-    [ -z "$raw" ] && return
-
-    # Try parsing as plain JSON first (older format)
-    local token
-    token=$(echo "$raw" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-
-    if [ -z "$token" ]; then
-        # Try hex-decoding (newer macOS/Claude Code returns hex-encoded data)
-        local decoded
-        decoded=$(echo "$raw" | xxd -r -p 2>/dev/null)
-        if [ -n "$decoded" ]; then
-            # Try jq on decoded data
-            token=$(echo "$decoded" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-
-            if [ -z "$token" ]; then
-                # Fall back to regex extraction (handles binary prefix bytes).
-                # Anchored to claudeAiOauth so an mcpOAuth server token is never
-                # sent to api.anthropic.com.
-                token=$(echo "$decoded" | grep -o '"claudeAiOauth":{[^}]*"accessToken":"[^"]*"' | head -1 | sed 's/.*"accessToken":"//;s/"$//')
-            fi
-        fi
-    fi
-
-    echo "$token"
+    # Missing, unsafe or unreadable file: ask the user to configure/sign in to
+    # the CLI with file-backed credentials instead of touching legacy Keychain.
+    return 0
 }
 
 # Check if currently in backoff from a 429

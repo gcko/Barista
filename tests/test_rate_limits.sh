@@ -1,8 +1,8 @@
 #!/bin/bash
 # ABOUTME: Tests for modules/rate-limits.sh -- _parse_reset_epoch (the #38 resets_at
 # ABOUTME: ISO-8601 -> epoch parser that works on BSD/macOS and GNU/Linux date) and
-# ABOUTME: credential-file permission enforcement, Keychain item selection when
-# ABOUTME: several 'Claude Code-credentials' items exist, and _check_backoff (the
+# ABOUTME: credential-file permission enforcement, no-Keychain fallback, and
+# ABOUTME: _check_backoff (the
 # ABOUTME: post-429 cooldown-state file reader).
 # ABOUTME: Run with: bash tests/test_rate_limits.sh
 
@@ -57,7 +57,13 @@ echo "=== Credential Permission Tests ==="
 TOKEN_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/barista-token-test.XXXXXX")"
 TOKEN_BIN="$TOKEN_CONFIG_DIR/bin"
 mkdir -p "$TOKEN_BIN"
-printf '#!/bin/sh\nexit 1\n' > "$TOKEN_BIN/security"
+cat > "$TOKEN_BIN/security" <<'STUB'
+#!/bin/sh
+printf 'unexpected Keychain invocation\n' >> "$KEYCHAIN_SENTINEL"
+exit 1
+STUB
+KEYCHAIN_SENTINEL="$TOKEN_CONFIG_DIR/keychain-called"
+export KEYCHAIN_SENTINEL
 chmod 700 "$TOKEN_BIN/security"
 printf '{"claudeAiOauth":{"accessToken":"permission-test-token"}}\n' > "$TOKEN_CONFIG_DIR/.credentials.json"
 
@@ -79,46 +85,20 @@ assert_eq "world-readable credentials file is rejected" \
 rm -f "$TOKEN_CONFIG_DIR/.credentials.json"
 
 # -----------------------------------------------------------------------------
-# _get_claude_token Keychain selection
-# The Keychain can hold several 'Claude Code-credentials' items, and `security -s`
-# alone returns whichever it finds first -- e.g. one under account "unknown" that
-# carries only mcpOAuth. The stub answers an account-scoped lookup (-a) from
-# $STUB_SCOPED and an unscoped one from $STUB_UNSCOPED; an empty value means "no
-# such item" (exit 44, as the real tool does).
+# Missing, malformed or unrelated credentials must fail closed without asking
+# security for credentials (the sentinel is local and never reads Keychain).
 # -----------------------------------------------------------------------------
-echo "=== Keychain Item Selection Tests ==="
-cat > "$TOKEN_BIN/security" <<'STUB'
-#!/bin/sh
-val="$STUB_UNSCOPED"
-for arg in "$@"; do [ "$arg" = "-a" ] && val="$STUB_SCOPED"; done
-[ -z "$val" ] && exit 44
-printf '%s\n' "$val"
-STUB
-chmod 700 "$TOKEN_BIN/security"
-
-MCP_ONLY='{"mcpOAuth":{"some-server|abc":{"accessToken":"mcp-server-token"}}}'
-CLAUDE_ITEM='{"claudeAiOauth":{"accessToken":"claude-token","refreshToken":"r"},"mcpOAuth":{}}'
-CLAUDE_ITEM_HEX="$(printf '%s' "$CLAUDE_ITEM" | xxd -p | tr -d '\n')"
-MCP_ONLY_HEX="$(printf '%s' "$MCP_ONLY" | xxd -p | tr -d '\n')"
-
-lookup() {
-    CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" USER=tester \
-        STUB_SCOPED="$1" STUB_UNSCOPED="$2" _get_claude_token
-}
-
-assert_eq "user's item wins over an mcpOAuth-only item found first" \
-    "claude-token" "$(lookup "$CLAUDE_ITEM" "$MCP_ONLY")"
-assert_eq "falls back to the unscoped lookup when no item for the user" \
-    "claude-token" "$(lookup "" "$CLAUDE_ITEM")"
-assert_eq "falls back when the user's item has no claudeAiOauth" \
-    "claude-token" "$(lookup "$MCP_ONLY" "$CLAUDE_ITEM")"
-assert_eq "hex-encoded user's item is still decoded" \
-    "claude-token" "$(lookup "$CLAUDE_ITEM_HEX" "$MCP_ONLY")"
-assert_eq "an mcpOAuth server token is never returned (hex regex path)" \
-    "" "$(lookup "$MCP_ONLY_HEX" "$MCP_ONLY_HEX")"
-assert_eq "unset USER still reaches the unscoped lookup" \
-    "claude-token" "$(CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" USER='' \
-        STUB_SCOPED="" STUB_UNSCOPED="$CLAUDE_ITEM" _get_claude_token)"
+assert_eq "missing credentials file returns no token" \
+    "" "$(CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" _get_claude_token)"
+printf '{not-json' > "$TOKEN_CONFIG_DIR/.credentials.json"
+chmod 600 "$TOKEN_CONFIG_DIR/.credentials.json"
+assert_eq "malformed credentials return no token" \
+    "" "$(CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" _get_claude_token)"
+printf '{"mcpOAuth":{"server":{"accessToken":"unrelated-token"}}}' > "$TOKEN_CONFIG_DIR/.credentials.json"
+assert_eq "unrelated MCP token is not used" \
+    "" "$(CLAUDE_CONFIG_DIR="$TOKEN_CONFIG_DIR" PATH="$TOKEN_BIN:$PATH" _get_claude_token)"
+assert_eq "no credential path calls security" "false" "$([ -e "$KEYCHAIN_SENTINEL" ] && echo true || echo false)"
+rm -f "$TOKEN_CONFIG_DIR/.credentials.json" "$KEYCHAIN_SENTINEL"
 
 rm -f "$TOKEN_BIN/security"
 rmdir "$TOKEN_BIN" "$TOKEN_CONFIG_DIR" 2>/dev/null
