@@ -2,8 +2,7 @@
 # ABOUTME: Tests for modules/rate-limits.sh -- _parse_reset_epoch (the #38 resets_at
 # ABOUTME: ISO-8601 -> epoch parser that works on BSD/macOS and GNU/Linux date) and
 # ABOUTME: credential-file permission enforcement, no-Keychain fallback, and
-# ABOUTME: _check_backoff (the
-# ABOUTME: post-429 cooldown-state file reader).
+# ABOUTME: _check_backoff (the post-429 cooldown-state file reader).
 # ABOUTME: Run with: bash tests/test_rate_limits.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
