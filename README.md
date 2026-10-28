@@ -30,7 +30,7 @@ A feature-rich, modular statusline for [Claude Code CLI](https://docs.anthropic.
 ### v1.6.1
 
 - **Private credential file** - Reads Claude Code OAuth from an owner-only `.credentials.json` file. No system Keychain access or migration. File permissions do not protect against other processes running as the same user.
-- Progressive fallback: tries plain JSON, then hex-decoding via `xxd`, then regex extraction
+- **Fail-closed credentials** - Missing, unsafe, malformed, or unrelated credential files return no token without invoking `security`.
 
 ### v1.6.0
 
